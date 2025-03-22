@@ -50,18 +50,22 @@ const createTableFromCsv = async (filePath, tableName) => {
         const csvStream = fastCsv
             .parse({ headers: true })
             .on("headers", async (cols) => {
-                headers.push(...cols.map(col => col.replace(/\s+/g, "_").toLowerCase()));
+                headers.push(...cols.map(col => col.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase()));
+                const uniqueHeaders = [...new Set(headers)];
+
                 csvStream.pause();
-                
                 const client = await pool.connect();
                 try {
-                    await client.query(`DROP TABLE IF EXISTS ${tableName}`);
-                    const columns = headers.map(header => `${header} TEXT`).join(", ");
-                    const createTableQuery = `CREATE TABLE ${tableName} (id SERIAL PRIMARY KEY, ${columns})`;
+                    await client.query(`DROP TABLE IF EXISTS "${tableName}"`);
+                    const columns = uniqueHeaders.map(header => `"${header}" TEXT`).join(", ");
+                    const createTableQuery = `CREATE TABLE "${tableName}" (id SERIAL PRIMARY KEY, ${columns})`;
+
+                    console.log("Generated Query:", createTableQuery);
                     await client.query(createTableQuery);
-                    console.log(`✅ Table '${tableName}' created.`);
-                    resolve(headers);
+                    console.log(`✅ Table '${tableName}' created with columns: ${uniqueHeaders.join(', ')}`);
+                    resolve(uniqueHeaders);
                 } catch (error) {
+                    console.error(`❗ Error creating table '${tableName}':`, error.message);
                     reject(error);
                 } finally {
                     client.release();
@@ -91,22 +95,23 @@ const importCsvToDb = async (filePath, tableName, headers) => {
                 const client = await pool.connect();
                 try {
                     await client.query("BEGIN");
-                    const columns = headers.join(", ");
+                    const columns = headers.map(header => `"${header}"`).join(", ");
                     const placeholders = headers.map((_, i) => `$${i + 1}`).join(", ");
-                    const insertQuery = `INSERT INTO ${tableName} (${columns}) VALUES (${placeholders})`;
+                    const insertQuery = `INSERT INTO "${tableName}" (${columns}) VALUES (${placeholders})`;
 
                     for (const row of csvData) {
                         await client.query(insertQuery, row);
                     }
                     await client.query("COMMIT");
-                    console.log(`✅ Data imported to '${tableName}'`);
+                    console.log(`✅ Data imported to '${tableName}' (${csvData.length} rows)`);
                     resolve();
                 } catch (err) {
                     await client.query("ROLLBACK");
+                    console.error(`❗ Error importing data to '${tableName}':`, err.message);
                     reject(err);
                 } finally {
                     client.release();
-                    fs.unlinkSync(filePath);
+                    fs.unlinkSync(filePath); // Remove the CSV after successful import
                 }
             })
             .on("error", (error) => reject(error));
@@ -121,16 +126,21 @@ app.post("/upload", upload.array("files", 10), async (req, res) => {
         return res.status(400).json({ message: "No files uploaded" });
     }
 
-    console.log("Uploaded Files:", req.files); // Debugging
+    console.log("📤 Uploaded Files:", req.files);
 
     try {
         for (const file of req.files) {
-            const tableName = file.originalname.split(".")[0].replace(/\s+/g, "_").toLowerCase();
+            const tableName = file.originalname.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+            console.log(`🚀 Processing File: ${file.originalname}, Table Name: ${tableName}`);
+
             const headers = await createTableFromCsv(file.path, tableName);
             await importCsvToDb(file.path, tableName, headers);
+
+            console.log(`✅ File '${file.originalname}' imported successfully with ${headers.length} columns.`);
         }
         res.json({ message: "All CSV files imported successfully" });
     } catch (error) {
+        console.error(`❗ Error during file processing:`, error.message);
         res.status(500).json({ error: error.message });
     }
 });
